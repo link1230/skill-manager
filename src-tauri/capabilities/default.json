@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "fs:default",
+    "fs:allow-remove",
+    "fs:allow-mkdir",
+    "fs:write-files",
+    "fs:scope-home-recursive"
+  ]
+}

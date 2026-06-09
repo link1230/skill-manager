@@ -1,0 +1,1 @@
+"use strict";const r=require("electron");r.contextBridge.exposeInMainWorld("electronAPI",{scanDirectory:e=>r.ipcRenderer.invoke("scan:directory",e),readFile:e=>r.ipcRenderer.invoke("file:read",e),writeFile:(e,i)=>r.ipcRenderer.invoke("file:write",e,i),deleteFile:e=>r.ipcRenderer.invoke("file:delete",e),getVersion:()=>r.ipcRenderer.invoke("app:getVersion")});

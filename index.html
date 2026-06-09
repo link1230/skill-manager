@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Skill Manager — v0.0.1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&family=Noto+Sans+SC:wght@400;500;700&family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+
+<div class="app">
+  <!-- Header -->
+  <header class="header">
+    <div class="logo">⚡</div>
+    <h1>AI Skill Manager</h1>
+    <span class="sub">v0.0.1</span>
+    <div class="spacer"></div>
+    <span class="badge" id="headerBadge"><span class="dot"></span> 未连接 Agent</span>
+  </header>
+
+  <div class="app-body">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">🌿 导航</div>
+      <div class="search-box">
+        <span class="icon">🔍</span>
+        <input type="text" id="searchInput" placeholder="搜索 skill..." oninput="filterSkills()">
+      </div>
+      <div class="nav-list">
+        <div class="nav-label">Agent</div>
+        <div class="nav-item active" data-agent="all" onclick="switchAgent(this,'all')">
+          <span class="ico">📦</span> 全部 <span class="count" id="countAll">12</span>
+        </div>
+        <div id="agentNavList"></div>
+        <div class="nav-divider"></div>
+        <div class="nav-label">管理</div>
+        <div class="nav-item" onclick="openAgentManager()">
+          <span class="ico">🔌</span> Agent 管理
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <div class="main-toolbar">
+        <h2 id="sectionTitle">全部 Skills</h2>
+        <span class="count" id="visibleCount">0 个模块</span>
+        <div class="spacer"></div>
+        <button class="btn-scan" id="scanBtn" onclick="scanSkills()">🔍 扫描发现</button>
+        <span class="discovery-info" id="discoveryInfo"><span class="dot live"></span> 实时监听中</span>
+        <div class="view-ops">
+          <button class="active" title="网格视图">▦</button>
+        </div>
+      </div>
+      <div class="tag-bar" id="tagBar"></div>
+      <div class="grid-scroll">
+        <div class="grid" id="skillGrid"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Status Bar -->
+  <footer class="status-bar">
+    <span><span class="dot green"></span> 运行中</span>
+    <span>📦 <span id="totalSkills">0</span> skills</span>
+    <span>🌐 <span id="globalCount">0</span> 全局</span>
+    <span>📁 <span id="projectCount">0</span> 项目</span>
+    <span>✅ <span id="enabledSkills">0</span> 已启用</span>
+    <span>🔗 <span id="agentCount">0</span> agents</span>
+    <div class="spacer"></div>
+    <span style="font-size:11px;font-weight:700;color:var(--text-muted)">v0.0.1</span>
+    <span class="sync" id="lastSync">上次同步: 刚刚</span>
+  </footer>
+</div>
+
+<!-- Detail Overlay -->
+<div class="detail-overlay" id="detailOverlay" onclick="closeDetail()"></div>
+
+<!-- Detail Panel -->
+<div class="detail-panel" id="detailPanel">
+  <div class="detail-header">
+    <button class="back" onclick="closeDetail()">✕</button>
+    <span class="dname" id="detailName">Skill Name</span>
+    <span class="dagent" id="detailAgent">Reasonix</span>
+  </div>
+  <div class="detail-body" id="detailBody"></div>
+  <div class="detail-actions" id="detailActions"></div>
+</div>
+
+<!-- Agent Management Modal -->
+<div class="agent-overlay" id="agentOverlay" onclick="if(event.target===this)closeAgentManager()">
+  <div class="agent-modal" id="agentModal">
+    <div class="agent-modal-header">
+      <h2>🔌 Agent 管理</h2>
+      <button class="close" onclick="closeAgentManager()">✕</button>
+    </div>
+    <div class="agent-modal-body" id="agentModalBody"></div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script type="module">
+import { readDir, readTextFile, remove, writeTextFile, exists, mkdir } from '@tauri-apps/plugin-fs';
+
+// ========== Data ==========
+const skillsData = [];
+
+let currentAgent = 'all';
+let currentTag = null;
+let editing = false;
+let currentSkillId = null;
+
+// ========== Tag Helpers ==========
+function getAllTags() {
+  const tagSet = new Set();
+  skillsData.forEach(s => s.tags.forEach(t => tagSet.add(t)));
+  return [...tagSet].sort();
+}
+
+function renderTagBar() {
+  const bar = document.getElementById('tagBar');
+  const allTags = getAllTags();
+  let filtered = skillsData;
+  if (currentAgent !== 'all') filtered = filtered.filter(s => s.agent === currentAgent);
+  const counts = {};
+  filtered.forEach(s => s.tags.forEach(t => { counts[t] = (counts[t]||0)+1; }));
+
+  let html = `<span class="tag-chip ${!currentTag?'active':''}" onclick="filterByTag(null)">🌿 全部</span>`;
+  allTags.forEach(t => {
+    const cnt = counts[t]||0;
+    if (cnt === 0) return;
+    html += `<span class="tag-chip ${currentTag===t?'active':''}" onclick="filterByTag('${t}')">${t} <span class="count">${cnt}</span></span>`;
+  });
+  bar.innerHTML = html;
+}
+
+function filterByTag(tag) {
+  currentTag = tag;
+  renderTagBar();
+  renderGrid();
+}
+
+// ========== Render ==========
+function renderGrid() {
+  const grid = document.getElementById('skillGrid');
+  const search = document.getElementById('searchInput').value.toLowerCase().trim();
+  let list = skillsData;
+
+  if (currentAgent !== 'all') list = list.filter(s => s.agent === currentAgent);
+  if (currentTag) list = list.filter(s => s.tags && s.tags.includes(currentTag));
+  if (search) list = list.filter(s => s.name.toLowerCase().includes(search) || s.desc.toLowerCase().includes(search));
+
+  const total = skillsData.length;
+  const enabled = skillsData.filter(s => s.enabled).length;
+  document.getElementById('totalSkills').textContent = total;
+  document.getElementById('enabledSkills').textContent = enabled;
+
+  const sectionTitle = document.getElementById('sectionTitle');
+  let agentLabel = '全部 Skills';
+  if (currentAgent !== 'all') {
+    const ag = agentsData.find(a => a.id === currentAgent);
+    agentLabel = ag ? ag.icon + ' ' + ag.name + ' Skills' : currentAgent + ' Skills';
+  }
+  const tagSuffix = currentTag ? ` · #${currentTag}` : '';
+  sectionTitle.textContent = agentLabel + tagSuffix;
+
+  if (list.length === 0) {
+    const scrollEl = document.querySelector('.grid-scroll');
+    grid.style.display = 'none';
+    if (!scrollEl.querySelector('.empty-state')) {
+      const es = document.createElement('div');
+      es.className = 'empty-state';
+      es.innerHTML = '<div class="ico">🍃</div><h3>没有匹配的 skill</h3><p>试试不同的筛选条件或搜索词？</p>';
+      scrollEl.classList.add('empty');
+      scrollEl.appendChild(es);
+    }
+    document.getElementById('visibleCount').textContent = '0 个模块';
+    return;
+  } else {
+    const scrollEl = document.querySelector('.grid-scroll');
+    scrollEl.classList.remove('empty');
+    const es = scrollEl.querySelector('.empty-state');
+    if (es) es.remove();
+    grid.style.display = '';
+  }
+
+  document.getElementById('visibleCount').textContent = `${list.length} 个模块`;
+  grid.innerHTML = list.map(s => `
+    <div class="card ${s.enabled?'':'disabled'}" onclick="openDetail('${s.id}')">
+      <div class="badge-group">
+        ${(()=>{const a=agentsData.find(x=>x.id===s.agent);const icon=a?a.icon:'🔌';const name=a?a.name:s.agent;return `<span class="badge-agent" style="background:${a?a.color+'18':'#f0e8d8'};border-color:${a?a.color:'#c4b89e'};color:${a?a.color:'#8a7b66'}">${icon} ${name}</span>`})()}
+        <span class="badge-scope ${s.scope}">${s.scope==='global'?'🌐 全局':'📁 项目'}</span>
+      </div>
+      <div class="icon-wrap">${s.icon}</div>
+      <div class="name">${s.name}</div>
+      <div class="desc">${s.desc}</div>
+      <div class="card-tags">${(s.tags||[]).map(t => `<span class="card-tag" onclick="event.stopPropagation();filterByTag('${t}')" title="筛选: ${t}">${t}</span>`).join('')}</div>
+      <div class="meta">
+        <span class="ver">v${s.version}</span>
+        <span>${s.updated}</span>
+        <span>${s.runAs}</span>
+      </div>
+      <div class="bottom-row">
+        <span style="font-size:11px;font-weight:600;color:var(--text-secondary)">${s.enabled?'🟢 启用':'⭕ 停用'}</span>
+        <label class="toggle" onclick="event.stopPropagation()">
+          <input type="checkbox" ${s.enabled?'checked':''} onchange="toggleSkill('${s.id}',this.checked)">
+          <span class="track"></span><span class="handle"></span>
+        </label>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ========== Toggle ==========
+async function toggleSkill(id, enabled) {
+  const s = skillsData.find(x => x.id === id);
+  if (!s) return;
+  const oldPath = s.path;
+  try {
+    if (enabled) {
+      if (oldPath.endsWith('.disabled')) {
+        const newPath = oldPath.replace(/\.disabled$/, '');
+        const content = await readTextFile(oldPath);
+        await writeTextFile(newPath, content);
+        await remove(oldPath);
+        s.path = newPath;
+      }
+    } else {
+      // Disable: append .disabled
+      if (!oldPath.endsWith('.disabled')) {
+        const newPath = oldPath + '.disabled';
+        // Write a copy then remove original
+        const content = await readTextFile(oldPath);
+        await writeTextFile(newPath, content);
+        await remove(oldPath);
+        s.path = newPath;
+      }
+    }
+    s.enabled = enabled;
+    saveState();
+    const label = enabled ? '已启用' : '已停用';
+    showToast(`${enabled?'🟢':'⭕'} ${s.name} ${label}`, enabled?'success':'error');
+    showToast('💡 重启 Agent 后生效', 'info');
+  } catch(e) {
+    showToast(`⚠️ 操作失败: ${e.message||e}`, 'error');
+    return;
+  }
+  document.getElementById('lastSync').textContent = `上次同步: 刚刚 (${s.name} → ${enabled?'启用':'停用'})`;
+  renderGrid();
+  if (currentSkillId === id) renderDetail(s);
+}
+
+// ========== Detail ==========
+function openDetail(id) {
+  const s = skillsData.find(x => x.id === id);
+  if (!s) return;
+  currentSkillId = id;
+  editing = false;
+  renderDetail(s);
+  document.getElementById('detailOverlay').classList.add('open');
+  document.getElementById('detailPanel').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeDetail() {
+  if (editing) { showToast('⚠️ 请先保存或取消编辑','error'); return; }
+  document.getElementById('detailOverlay').classList.remove('open');
+  document.getElementById('detailPanel').classList.remove('open');
+  document.body.style.overflow = '';
+  currentSkillId = null;
+}
+
+function renderDetail(s) {
+  document.getElementById('detailName').textContent = s.name;
+  const ag = agentsData.find(a => a.id === s.agent);
+  document.getElementById('detailAgent').textContent = ag ? ag.icon + ' ' + ag.name : s.agent;
+
+  const body = document.getElementById('detailBody');
+  body.innerHTML = `
+    <div class="meta-grid">
+      <div class="meta-item">
+        <div class="label">版本</div>
+        <div class="value">v${s.version}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">更新日期</div>
+        <div class="value">${s.updated}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">运行模式</div>
+        <div class="value"><span class="tag ${s.runAs==='subagent'?'primary':''}">${s.runAs}</span></div>
+      </div>
+      <div class="meta-item">
+        <div class="label">模型</div>
+        <div class="value"><span class="tag">${s.model}</span></div>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <h3>📖 简介</h3>
+      <p>${s.desc}</p>
+    </div>
+
+    <div class="detail-section">
+      <h3>🏷️ 标签</h3>
+      <div class="detail-tags">${(s.tags||[]).map(t => `<span class="detail-tag">${t}</span>`).join('')||'<span style="color:var(--text-muted);font-size:12px">暂无标签</span>'}</div>
+    </div>
+
+    <div class="detail-section">
+      <h3>🔧 使用方法</h3>
+      <div class="code-block">${s.usage}</div>
+    </div>
+
+    <div class="detail-section">
+      <h3>📂 文件位置</h3>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <span class="detail-tag" style="background:${s.scope==='global'?'#e8e0f0':'#e0f0e8'};border-color:${s.scope==='global'?'#b79ee0':'#7ac8a8'};color:${s.scope==='global'?'#8b6fc0':'#3a8f6f'}">${s.scope==='global'?'🌐 全局 Skill':'📁 项目 Skill'}</span>
+        <span class="detail-tag">${s.scope==='global'?'适用于所有项目':'仅限当前项目'}</span>
+      </div>
+      <p style="font-family:var(--mono);font-size:12px;color:var(--text-secondary);word-break:break-all">
+        ${s.path}
+      </p>
+    </div>
+  `;
+
+  const actions = document.getElementById('detailActions');
+  actions.innerHTML = `
+    <label class="toggle" style="margin-right:auto">
+      <input type="checkbox" ${s.enabled?'checked':''} onchange="toggleSkill('${s.id}',this.checked)">
+      <span class="track"></span><span class="handle"></span>
+    </label>
+    <span style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-right:auto">${s.enabled?'🟢 已启用':'⭕ 已停用'}</span>
+    <button class="btn btn-ghost" onclick="startEdit('${s.id}')">✏️ 编辑</button>
+    <button class="btn btn-danger" onclick="uninstallSkill('${s.id}')">🗑️ 卸载</button>
+  `;
+}
+
+// ========== Edit Mode ==========
+function startEdit(id) {
+  const s = skillsData.find(x => x.id === id);
+  if (!s) return;
+  editing = true;
+  document.getElementById('detailName').textContent = '✏️ ' + s.name;
+
+  const body = document.getElementById('detailBody');
+  body.innerHTML = `
+    <div class="edit-field">
+      <label>名称 (Name)</label>
+      <input type="text" id="editName" value="${s.name}">
+    </div>
+    <div class="edit-field">
+      <label>简介 (Description)</label>
+      <textarea id="editDesc" rows="3">${s.desc}</textarea>
+    </div>
+    <div class="edit-field">
+      <label>🏷️ 标签 (回车添加)</label>
+      <div class="tag-edit-area" id="tagEditArea">
+        ${(s.tags||[]).map(t => `<span class="edit-tag" data-tag="${t}">${t}<span class="remove-tag" onclick="this.parentElement.remove()">×</span></span>`).join('')}
+        <input class="tag-input" id="tagInput" placeholder="输入后回车..." onkeydown="addEditTag(event)">
+      </div>
+    </div>
+    <div class="edit-field">
+      <label>使用方法 (Usage)</label>
+      <textarea id="editUsage" rows="6">${s.usage}</textarea>
+    </div>
+    <div class="edit-field">
+      <label>版本</label>
+      <input type="text" id="editVersion" value="${s.version}">
+    </div>
+    <p style="font-size:11px;color:var(--text-muted);margin-top:8px;font-weight:600">💡 修改保存后将同步到 agent 的 SKILL.md 文件</p>
+  `;
+
+  const actions = document.getElementById('detailActions');
+  actions.innerHTML = `
+    <button class="btn btn-ghost" onclick="cancelEdit('${s.id}')">取消</button>
+    <div class="spacer"></div>
+    <button class="btn btn-yellow" onclick="saveEdit('${s.id}')">💾 保存修改</button>
+  `;
+}
+
+function cancelEdit(id) {
+  editing = false;
+  const s = skillsData.find(x => x.id === id);
+  if (s) renderDetail(s);
+}
+
+// ========== Tag editing helpers ==========
+function addEditTag(e) {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const input = document.getElementById('tagInput');
+  const val = input.value.trim();
+  if (!val) return;
+  const area = document.getElementById('tagEditArea');
+  if (area.querySelector(`.edit-tag[data-tag="${val}"]`)) { input.value = ''; return; }
+  const chip = document.createElement('span');
+  chip.className = 'edit-tag';
+  chip.dataset.tag = val;
+  chip.innerHTML = `${val}<span class="remove-tag" onclick="this.parentElement.remove()">×</span>`;
+  area.insertBefore(chip, input);
+  input.value = '';
+  input.focus();
+}
+
+function getEditTags() {
+  const chips = document.querySelectorAll('#tagEditArea .edit-tag');
+  return [...chips].map(c => c.dataset.tag);
+}
+
+function saveEdit(id) {
+  const s = skillsData.find(x => x.id === id);
+  if (!s) return;
+  s.name = document.getElementById('editName').value.trim() || s.name;
+  s.desc = document.getElementById('editDesc').value.trim() || s.desc;
+  s.tags = getEditTags();
+  s.usage = document.getElementById('editUsage').value.trim() || s.usage;
+  s.version = document.getElementById('editVersion').value.trim() || s.version;
+  s.updated = new Date().toISOString().slice(0,10);
+  editing = false;
+  saveState();
+  const agName = agentsData.find(a => a.id === s.agent);
+  showToast(`✅ ${s.name} 已更新并同步到 ${agName?agName.name:s.agent}`, 'success');
+  document.getElementById('lastSync').textContent = `上次同步: 刚刚 (${s.name} → 已编辑)`;
+  renderTagBar();
+  renderGrid();
+  renderDetail(s);
+}
+
+// ========== Uninstall ==========
+async function uninstallSkill(id) {
+  if (!confirm(`🗑️ 确定要卸载 "${skillsData.find(x=>x.id===id).name}" 吗？\n此操作将删除本地文件并移除该 skill。`)) return;
+  const idx = skillsData.findIndex(x => x.id === id);
+  if (idx === -1) return;
+  const s = skillsData[idx];
+  // Delete the actual file from disk
+  try {
+    await remove(s.path);
+    showToast(`🗑️ ${s.name} 已删除（文件已移除）`, 'error');
+  } catch(e) {
+    showToast(`⚠️ ${s.name} 已从列表移除，但文件删除失败: ${e.message||e}`, 'error');
+  }
+  skillsData.splice(idx, 1);
+  saveState();
+  const uaName = agentsData.find(a => a.id === s.agent);
+  document.getElementById('lastSync').textContent = `上次同步: 刚刚 (${s.name} → 已删除)`;
+  closeDetail();
+  renderTagBar();
+  renderGrid();
+  updateCounts();
+}
+
+// ========== Filter ==========
+function renderSidebarAgents() {
+  const container = document.getElementById('agentNavList');
+  let html = '';
+  agentsData.forEach(a => {
+    const active = currentAgent === a.id ? 'active' : '';
+    const count = skillsData.filter(s => s.agent === a.id).length;
+    html += `<div class="nav-item ${active}" data-agent="${a.id}" onclick="switchAgent(this,'${a.id}')">
+      <span class="ico">${a.icon}</span> ${a.name} <span class="count">${count}</span>
+    </div>`;
+  });
+  container.innerHTML = html;
+}
+
+function switchAgent(el, agent) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  el.classList.add('active');
+  currentAgent = agent;
+  currentTag = null;
+  renderTagBar();
+  renderGrid();
+}
+
+function filterSkills() {
+  renderGrid();
+}
+
+// ========== Toast ==========
+function showToast(msg, type='info') {
+  const c = document.getElementById('toastContainer');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2500);
+}
+
+// ========== Scan / Discovery ==========
+function scanSkills() {
+  const btn = document.getElementById('scanBtn');
+  const info = document.getElementById('discoveryInfo');
+  btn.innerHTML = '<span class="spin">🔍</span> 扫描中...';
+  btn.classList.add('scanning');
+  info.innerHTML = '<span class="dot stale"></span> 正在发现...';
+
+  if (agentsData.length === 0) {
+    btn.innerHTML = '🔍 扫描发现';
+    btn.classList.remove('scanning');
+    info.innerHTML = '<span class="dot stale"></span> 未连接';
+    showToast('⚠️ 请先添加一个 Agent 才能扫描', 'error');
+    return;
+  }
+
+  // Simulate scanning agent directories
+  // Re-scan all agents
+  (async () => {
+    let totalFound = 0;
+    // Keep disabled skills, remove only enabled ones
+    const disabled = skillsData.filter(s => !s.enabled);
+    skillsData.splice(0, skillsData.length, ...disabled);
+    for (const a of agentsData) {
+      totalFound += await scanAgentDirectory(a.id, a.globalPath, a.projectPath, a.name, true);
+    }
+    btn.innerHTML = '🔍 扫描发现';
+    btn.classList.remove('scanning');
+    info.innerHTML = '<span class="dot live"></span> 实时监听中';
+    document.getElementById('lastSync').textContent = `上次扫描: ${new Date().toLocaleTimeString()}`;
+    renderSidebarAgents();
+    renderTagBar();
+    renderGrid();
+    updateCounts();
+    saveState();
+    showToast(`🔍 扫描完成！共 ${totalFound} 个 skill`, totalFound > 0 ? 'success' : 'info');
+  })();
+}
+
+let agentsData = [];
+
+function openAgentManager() {
+  const overlay = document.getElementById('agentOverlay');
+  overlay.classList.add('open');
+  renderAgentManager();
+}
+
+function closeAgentManager() {
+  document.getElementById('agentOverlay').classList.remove('open');
+}
+
+function renderAgentManager() {
+  const body = document.getElementById('agentModalBody');
+
+  // Connected agents list
+  let agentsHtml = '<div class="agent-section"><h3>📋 已连接的 Agent</h3>';
+  if (agentsData.length === 0) {
+    agentsHtml += '<div class="no-agents"><div class="ico">🔌</div><p>尚未连接任何 Agent，请添加</p></div>';
+  } else {
+    agentsData.forEach(a => {
+      agentsHtml += `
+        <div class="agent-card">
+          <div class="aicon" style="background:${a.color}18;border-color:${a.color}">${a.icon}</div>
+          <div class="ainfo">
+            <div class="aname">${a.name}</div>
+            <div class="apath">${a.globalPath}</div>
+          </div>
+          <div class="askill-count"><span>${a.skillCount}</span> skills</div>
+          <span class="astatus ${a.connected?'online':'offline'}">${a.connected?'🟢 已连接':'⭕ 未连接'}</span>
+          <button class="btn-agent-del" onclick="event.stopPropagation();removeAgent('${a.id}')" title="删除 Agent">🗑️</button>
+        </div>`;
+    });
+  }
+  agentsHtml += '</div>';
+
+  // Add agent form
+  agentsHtml += `
+    <div class="agent-section">
+      <h3>➕ 添加新 Agent</h3>
+      <div class="add-agent-form">
+        <div class="form-row">
+          <div class="form-group" style="flex:0.5">
+            <label>Agent 名称</label>
+            <input type="text" id="agentNameInput" value="" placeholder="例: Reasonix Code">
+          </div>
+          <div class="form-group" style="flex:0.3">
+            <label>标识符</label>
+            <input type="text" id="agentIdInput" value="" placeholder="例: reasonix">
+          </div>
+          <div class="form-group" style="flex:0.2">
+            <label>图标</label>
+            <input type="text" id="agentIconInput" value="🔌" placeholder="Emoji">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>全局 Skill 路径</label>
+            <input type="text" id="agentGlobalPath" value="~/.claude/skills/" placeholder="~/.agent/skills/">
+            <div class="hint">此路径下的 skill 对所有项目可用</div>
+          </div>
+          <div class="form-group">
+            <label>项目 Skill 路径</label>
+            <input type="text" id="agentProjectPath" value=".claude/skills/" placeholder=".agent/skills/">
+            <div class="hint">项目目录下的相对路径</div>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <button class="btn-add-agent" onclick="addNewAgent()">➕ 添加并扫描</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="agent-section" style="margin-bottom:0">
+      <h3>💡 工作原理</h3>
+      <div style="background:var(--bg);border:2px solid #e8e2d6;border-radius:var(--radius-card);padding:14px 18px;font-size:12px;line-height:1.8;color:var(--text-secondary)">
+        <p><strong style="color:var(--text-primary)">添加 Agent</strong> → 配置 skill 目录 → 扫描发现已有 skill → 管理端自动识别 <strong>全局</strong> 或 <strong>项目</strong> 范围</p>
+        <p><strong style="color:var(--text-primary)">操作同步</strong> → 在管理端启用/禁用/编辑/删除 skill 后，自动写入对应 Agent 的文件目录</p>
+        <p><strong style="color:var(--text-primary)">双向监听</strong> → Agent 端新增/修改 skill 后，管理端实时检测并更新列表</p>
+      </div>
+    </div>`;
+
+  body.innerHTML = agentsHtml;
+}
+
+function addNewAgent() {
+  const name = document.getElementById('agentNameInput').value.trim();
+  const id = document.getElementById('agentIdInput').value.trim() || name.toLowerCase().replace(/[^a-z0-9]/g,'-');
+  const icon = document.getElementById('agentIconInput').value.trim() || '🔌';
+  const globalPath = document.getElementById('agentGlobalPath').value.trim();
+  const projectPath = document.getElementById('agentProjectPath').value.trim();
+
+  if (!name || !globalPath) { showToast('⚠️ 请填写 Agent 名称和全局路径', 'error'); return; }
+  if (agentsData.find(a => a.id === id)) { showToast('⚠️ 该标识符已存在', 'error'); return; }
+
+  agentsData.push({ id, icon, name, globalPath, projectPath, skillCount:0, connected:true, color:'#19c8b9' });
+
+  // Scan the file system
+  scanAgentDirectory(id, globalPath, projectPath, name);
+
+  renderSidebarAgents();
+  renderAgentManager();
+  renderGrid();
+  updateCounts();
+  saveState();
+  showToast(`🔌 ${name} 添加成功 (agents:${agentsData.length}, skills:${skillsData.length})，正在扫描...`, 'info');
+}
+
+// ========== File System Scanner ==========
+function resolvePath(p) {
+  if (p.startsWith('~')) {
+    const home = window.__TAURI_INTERNALS__ ? 'C:/Users/Administrator' : 'C:/Users/Administrator';
+    return home + p.slice(1);
+  }
+  return p;
+}
+
+function parseFrontmatter(text) {
+  const m = text.match(/^---[\t ]*\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return { _hasFrontmatter: false };
+  const yaml = m[1].trim();
+  const out = { _hasFrontmatter: true };
+  yaml.split('\n').forEach(line => {
+    const colon = line.indexOf(':');
+    if (colon === -1) return;
+    const key = line.substring(0, colon).trim();
+    let val = line.substring(colon + 1).trim();
+    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+    if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1);
+    out[key] = val;
+  });
+  return out;
+}
+
+function getFallbackIcon(name) {
+  const icons = { explore:'🔍', research:'📚', review:'👁️', 'security-review':'🔒', test:'🧪', 'gpt-taste':'🎨', 'image-to-code':'🖼️', 'ppt-master':'📊', 'format-code':'✨', 'lint-check':'🔍', 'commit-helper':'💬', 'doc-gen':'📝' };
+  return icons[name] || '📄';
+}
+
+async function scanAgentDirectory(agentId, globalPath, projectPath, agentName, silent) {
+  const agent = agentsData.find(a => a.id === agentId);
+  if (!agent) return 0;
+
+  let found = 0;
+
+  // Helper to parse a skill from a .md file — only if it has valid frontmatter
+  const tryReadSkill = async (skillPath, scope, dirName) => {
+    try {
+      const content = await readTextFile(skillPath);
+      const fm = parseFrontmatter(content);
+      if (!fm._hasFrontmatter || !fm.name) return false;
+      const skillName = fm.name;
+      const sid = agentId + '-' + (scope === 'project' ? 'project-' : '') + skillName;
+      if (skillsData.find(x => x.id === sid)) return false;
+      skillsData.push({
+        id: sid, name: skillName, agent: agentId, scope,
+        path: skillPath, enabled: true,
+        tags: fm.tags ? fm.tags.split(',').map(t => t.trim()) : [],
+        version: fm.version || '0.0.0',
+        updated: new Date().toISOString().slice(0, 10),
+        desc: fm.description || (fm.desc || ''),
+        icon: getFallbackIcon(skillName),
+        runAs: fm.run_as || 'inline',
+        model: fm.model || 'default',
+        usage: fm.usage || ('调用 skill: ' + skillName)
+      });
+      return true;
+    } catch(e) { return false; }
+  };
+
+  // Scan global path
+  try {
+    const resolved = resolvePath(globalPath);
+    // Recursive scan — look for .md files at every level
+    const scanDir = async (basePath, scope, depth) => {
+      if (depth > 3) return;
+      let subEntries;
+      try { subEntries = await readDir(basePath); } catch(e) { return; }
+      for (const e of subEntries) {
+        if (!e.name || e.name === '.' || e.name === '..') continue;
+        const entryPath = basePath.replace(/\\/g,'/').replace(/\/$/, '') + '/' + e.name;
+        // .md files or SKILL.md (both formats)
+        if (e.name.endsWith('.md')) {
+          if (await tryReadSkill(entryPath, scope, e.name.replace(/\.md$/,''))) found++;
+          continue;
+        }
+        // Try entry/SKILL.md (nested subdirectory format)
+        if (await tryReadSkill(entryPath + '/SKILL.md', scope, e.name)) { found++; }
+        // Recurse into directories (may have nested skills)
+        await scanDir(entryPath, scope, depth + 1);
+      }
+    };
+
+    await scanDir(resolved, 'global', 0);
+    const msg = found > 0
+      ? '✅ 找到 ' + found + ' 个 skill'
+      : '📂 未找到 SKILL.md（该目录下暂无自定义 skill）';
+    showToast(msg, found ? 'success' : 'info');
+  } catch(e) {
+    showToast('⚠️ 无法读取 ' + globalPath + ' — ' + (e.message||String(e)), 'error');
+  }
+
+  // Scan project path
+  if (projectPath) {
+    try {
+      await scanDir(resolvePath(projectPath), 'project', 0);
+    } catch(e) { /* project path not found */ }
+  }
+
+  agent.skillCount = skillsData.filter(s => s.agent === agentId).length;
+  agent.connected = true;
+
+  if (!silent) {
+    renderAgentManager();
+    renderSidebarAgents();
+    renderTagBar();
+    renderGrid();
+    updateCounts();
+    saveState();
+    showToast(`✅ ${agentName} 已连接！扫描到 ${found} 个 skill`, found > 0 ? 'success' : 'info');
+  }
+  return found;
+}
+
+// ========== Remove Agent ==========
+function removeAgent(agentId) {
+  const agent = agentsData.find(a => a.id === agentId);
+  if (!agent) return;
+  if (!confirm(`🗑️ 确定删除 Agent「${agent.name}」吗？\n关联的 ${agent.skillCount} 个 skill 也将被移除。`)) return;
+  agentsData = agentsData.filter(a => a.id !== agentId);
+  skillsData.splice(0, skillsData.length, ...skillsData.filter(s => s.agent !== agentId));
+  if (currentAgent === agentId) currentAgent = 'all';
+  renderSidebarAgents();
+  renderAgentManager();
+  renderTagBar();
+  renderGrid();
+  updateCounts();
+  saveState();
+  showToast(`🗑️ ${agent.name} 已删除`, 'error');
+}
+
+// ========== Counts ==========
+function updateCounts() {
+  document.getElementById('countAll').textContent = skillsData.length;
+  document.getElementById('totalSkills').textContent = skillsData.length;
+  document.getElementById('enabledSkills').textContent = skillsData.filter(s => s.enabled).length;
+  document.getElementById('globalCount').textContent = skillsData.filter(s => s.scope === 'global').length;
+  document.getElementById('projectCount').textContent = skillsData.filter(s => s.scope === 'project').length;
+  document.getElementById('agentCount').textContent = agentsData.length;
+  const badge = document.getElementById('headerBadge');
+  if (agentsData.length > 0) {
+    const a = agentsData[0];
+    badge.innerHTML = `<span class="dot" style="background:var(--success)"></span> 已连接 · ${a.icon} ${a.name}`;
+  } else {
+    badge.innerHTML = '<span class="dot" style="background:var(--warning)"></span> 未连接 Agent';
+  }
+}
+
+// ========== Expose to window (for inline onclick handlers) ==========
+Object.assign(window, {
+  filterSkills,
+  switchAgent,
+  toggleSkill,
+  openDetail,
+  closeDetail,
+  startEdit,
+  cancelEdit,
+  saveEdit,
+  uninstallSkill,
+  filterByTag,
+  addEditTag,
+  getEditTags,
+  openAgentManager,
+  closeAgentManager,
+  addNewAgent,
+  removeAgent,
+  scanSkills,
+  showToast
+});
+
+// ========== Persistence ==========
+const STORAGE_DIR = 'C:/Users/Administrator/.skill-manager';
+const STORAGE_FILE = STORAGE_DIR + '/state.json';
+
+async function saveState() {
+  try {
+    await mkdir(STORAGE_DIR, { recursive: true });
+    await writeTextFile(STORAGE_FILE, JSON.stringify({ agentsData, skillsData }, null, 2));
+  } catch(e) { /* silent */ }
+}
+
+async function loadState() {
+  try {
+    if (await exists(STORAGE_FILE)) {
+      const raw = await readTextFile(STORAGE_FILE);
+      const data = JSON.parse(raw);
+      if (data.agentsData?.length) {
+        agentsData = data.agentsData;
+        // Re-add functions that JSON doesn't serialize
+      }
+      if (data.skillsData?.length) {
+        skillsData.splice(0, skillsData.length, ...data.skillsData);
+      }
+      return true;
+    }
+  } catch(e) { /* first run */ }
+  return false;
+}
+
+// ========== Init ==========
+async function init() {
+  const loaded = await loadState();
+  renderSidebarAgents();
+  renderTagBar();
+  renderGrid();
+  updateCounts();
+  if (loaded) {
+    showToast('📂 已加载 ' + agentsData.length + ' 个 Agent，' + skillsData.length + ' 个 Skill', 'info');
+  }
+}
+init();
+</script>
+</body>
+</html>
